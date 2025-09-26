@@ -88,6 +88,7 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->priority = 5;            // default nice/priority for a new process
 
   release(&ptable.lock);
 
@@ -141,6 +142,7 @@ userinit(void)
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
+  p->priority = 5;            // init (PID 1) starts with nice/priority 5
 
   // this assignment to p->state lets other cores
   // run this process. the acquire forces the above
@@ -199,6 +201,7 @@ fork(void)
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
+  np->priority = curproc->priority;   // child inherits parent's priority
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
@@ -545,6 +548,13 @@ setnice(int pid, int nice)
     /* ******************** */
     /* * WRITE YOUR CODE    */
     /* ******************** */
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    	if (p->state != UNUSED && p->pid == pid) {
+		p->priority = nice;          // store in existing priority field
+      		release(&ptable.lock);
+      		return 0;
+    	}
+  }
 
     release(&ptable.lock);
     return -1;
@@ -553,28 +563,56 @@ setnice(int pid, int nice)
 int
 getnice(int pid)
 {
+    int val = -1;                    // default if not found
     struct proc *p;
     acquire(&ptable.lock);
     
     /* ******************** */
     /* * WRITE YOUR CODE    */
     /* ******************** */
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    	if (p->state != UNUSED && p->pid == pid) {
+      		val = p->priority;           // read from priority field
+      		break;
+    	}
+  }
 
     release(&ptable.lock);
-    return -1;
+    return val;
 }
 
 void
 ps(void)
 {
-    struct proc *p;
-    acquire(&ptable.lock);
-    cprintf("name\tpid\tppid\tmem\tprio\tstate\n");
+  static char *states[] = {
+    [UNUSED]   = "UNUSED",
+    [EMBRYO]   = "EMBRYO",
+    [SLEEPING] = "SLEEPING",
+    [RUNNABLE] = "RUNNABLE",
+    [RUNNING]  = "RUNNING",
+    [ZOMBIE]   = "ZOMBIE",
+  };
 
+  struct proc *p;
+
+  acquire(&ptable.lock);
     /* ******************** */
     /* * WRITE YOUR CODE    */
     /* ******************** */
+  cprintf("name\tpid\tppid\tmem\tprio\tstate\n");
 
-    release(&ptable.lock);
-    return;
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->state == UNUSED)
+      continue;
+
+    int ppid = p->parent ? p->parent->pid : -1;
+    char *st = (p->state >= 0 && p->state < NELEM(states) && states[p->state])
+               ? states[p->state] : "???";
+
+    cprintf("%s\t%d\t%d\t%d\t%d\t%s\n",
+            p->name, p->pid, ppid, p->sz, p->priority, st);
+  }
+
+  release(&ptable.lock);
+  return;
 }
