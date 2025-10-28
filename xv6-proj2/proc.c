@@ -12,6 +12,81 @@ struct {
   struct proc proc[NPROC];
 } ptable;
 
+static struct proc *rq_head = 0;
+static struct proc *rq_tail = 0;
+
+static int
+prio_cmp(struct proc *a, struct proc *b)
+{
+  // Lower numeric nice = higher scheduling priority
+  if (a->priority != b->priority)
+    return (a->priority < b->priority) ? -1 : 1;
+  
+  // Tie-breaker: larger PID first
+  if (a->pid != b->pid)
+    return (a->pid > b->pid) ? -1 : 1;
+
+  return 0;
+}
+
+static void
+rq_enqueue(struct proc *p)
+{
+  p->rq_next = 0;
+  if (!rq_head) { rq_head = rq_tail = p; return; }
+
+  if (prio_cmp(p, rq_head) < 0) {
+    p->rq_next = rq_head; rq_head = p; return;
+  }
+  struct proc *cur = rq_head;
+  while (cur->rq_next && prio_cmp(p, cur->rq_next) >= 0)
+    cur = cur->rq_next;
+  p->rq_next = cur->rq_next;
+  cur->rq_next = p;
+  if (!p->rq_next) rq_tail = p;
+}
+
+// take it out of its old spot
+static void
+rq_remove(struct proc *p){
+  if(!rq_head) return;
+  if(rq_head == p){
+    rq_head = p->rq_next;
+    if(!rq_head) rq_tail = 0;
+    p->rq_next = 0;
+    return;
+  }
+  struct proc *cur = rq_head;
+  while(cur->rq_next && cur->rq_next != p) cur = cur->rq_next;
+  if(cur->rq_next == p){
+    cur->rq_next = p->rq_next;
+    if(!cur->rq_next) rq_tail = cur;
+    p->rq_next = 0;
+  }
+}
+
+int need_resched = 0;
+
+static void maybe_request_resched(struct proc *newp) {
+  struct proc *cur = myproc();
+  if (cur && cur->state == RUNNING) {
+    if (prio_cmp(newp, cur) < 0)   // newp outranks current
+      need_resched = 1;
+  }
+}
+
+
+static struct proc*
+rq_dequeue(void)
+{
+  if (!rq_head) return 0;
+  struct proc *p = rq_head;
+  rq_head = p->rq_next;
+  if (!rq_head) rq_tail = 0;
+  p->rq_next = 0;
+  return p;
+}
+
 static struct proc *initproc;
 
 int nextpid = 1;
