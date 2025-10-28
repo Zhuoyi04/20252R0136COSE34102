@@ -13,6 +13,7 @@ struct gatedesc idt[256];
 extern uint vectors[];  // in vectors.S: array of 256 entry pointers
 struct spinlock tickslock;
 uint ticks;
+extern int need_resched;
 
 void
 tvinit(void)
@@ -43,8 +44,13 @@ trap(struct trapframe *tf)
     syscall();
     if(myproc()->killed)
       exit();
-    return;
+
+    if (myproc() && myproc()->state == RUNNING && need_resched) {
+    need_resched = 0;
+    yield();
   }
+    return;
+ }
 
   switch(tf->trapno){
   case T_IRQ0 + IRQ_TIMER:
@@ -102,9 +108,21 @@ trap(struct trapframe *tf)
 
   // Force process to give up CPU on clock tick.
   // If interrupts were on while locks held, would need to check nlock.
-  if(myproc() && myproc()->state == RUNNING &&
-     tf->trapno == T_IRQ0+IRQ_TIMER)
+  //if(myproc() && myproc()->state == RUNNING &&
+     //tf->trapno == T_IRQ0+IRQ_TIMER)
+    // yield();
+   
+    // Voluntary reschedule if priority order changed (Project 2)
+  if (myproc() && myproc()->state == RUNNING &&
+      (tf->cs & 3) == DPL_USER && need_resched) {
+    need_resched = 0;
     yield();
+  }
+
+  // Check if the process has been killed since we yielded
+  if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+    exit();
+
 
   // Check if the process has been killed since we yielded
   if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
