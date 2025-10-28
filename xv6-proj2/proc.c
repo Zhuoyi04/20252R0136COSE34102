@@ -162,6 +162,8 @@ allocproc(void)
 
 found:
   p->state = EMBRYO;
+  p->priority = 10;    // default nice value (higher numeric = higher priority)
+  p->rq_next  = 0;
   p->pid = nextpid++;
 
   release(&ptable.lock);
@@ -226,6 +228,7 @@ userinit(void)
   acquire(&ptable.lock);
 
   p->state = RUNNABLE;
+  rq_enqueue(p);
 
   release(&ptable.lock);
 }
@@ -287,11 +290,21 @@ fork(void)
 
   safestrcpy(np->name, curproc->name, sizeof(curproc->name));
 
+  // R1: assign child's priority from parent (lower = higher priority)
+  if (curproc->priority >= 15)
+    np->priority = curproc->priority / 2;
+  else
+    np->priority = curproc->priority + 1;
+  
   pid = np->pid;
 
+  // R2: instead of plain RUNNABLE, enqueue into the priority ready queue
   acquire(&ptable.lock);
 
   np->state = RUNNABLE;
+
+  rq_enqueue(np);
+  maybe_request_resched(np);
 
   release(&ptable.lock);
 
@@ -407,15 +420,12 @@ scheduler(void)
     // Enable interrupts on this processor.
     sti();
 
-    // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
+     // Take the highest-priority RUNNABLE process from our ready queue.
+    p = rq_dequeue();
+    if(p){
+      // Switch to chosen process. It will release/reacquire ptable.lock as needed.
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
@@ -462,8 +472,10 @@ sched(void)
 void
 yield(void)
 {
+  struct proc *p = myproc();
   acquire(&ptable.lock);  //DOC: yieldlock
-  myproc()->state = RUNNABLE;
+  p->state = RUNNABLE;
+  rq_enqueue(p);       // R2: maintain priority order
   sched();
   release(&ptable.lock);
 }
@@ -536,9 +548,13 @@ wakeup1(void *chan)
 {
   struct proc *p;
 
-  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if(p->state == SLEEPING && p->chan == chan) {
       p->state = RUNNABLE;
+      rq_enqueue(p);      // R2
+      maybe_request_resched(p);
+	}
+  }
 }
 
 // Wake up all processes sleeping on chan.
@@ -563,8 +579,11 @@ kill(int pid)
     if(p->pid == pid){
       p->killed = 1;
       // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
+      if(p->state == SLEEPING) {
         p->state = RUNNABLE;
+	rq_enqueue(p);
+      }
+
       release(&ptable.lock);
       return 0;
     }
@@ -621,6 +640,11 @@ setnice(int pid, int nice)
   for( p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->pid==pid){
       p->priority = nice;
+      if (p->state == RUNNABLE) {   // reorder immediately
+        rq_remove(p);
+        rq_enqueue(p);
+	maybe_request_resched(p);
+      }
       release(&ptable.lock);
       return 0;
     }
