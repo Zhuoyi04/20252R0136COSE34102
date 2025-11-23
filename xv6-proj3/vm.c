@@ -395,14 +395,42 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 void
 page_fault(void)
 {
+  struct proc *p = myproc();
   uint va = rcr2();
-  if(va < 0) {
-    panic("Invalid access");
-    return;
+
+
+  pte_t *pte = walkpgdir(p->pgdir, (void*)va, 0);
+  if(!pte || !(*pte & PTE_P))
+    panic("COW: invalid access");
+
+  // We expect a write fault on a read-only user page.
+  // If it's already writable, this is not a COW fault.
+  if(*pte & PTE_W)
+    panic("COW: non-COW fault");
+
+  uint pa = PTE_ADDR(*pte);
+  int rc = get_refcount(pa);
+
+  // If shared page -> Copy
+  if(rc > 1){
+    char *mem = kalloc();
+    if(mem == 0)
+      panic("COW: kalloc failed");
+
+    memmove(mem, (char*)P2V(pa), PGSIZE);
+    dec_refcount(pa);
+
+    // New mapping: same flags, but writable now
+    *pte = V2P(mem) | (PTE_FLAGS(*pte) | PTE_W);
+  } else {
+    // Exclusive page: just make it writable
+    *pte = (*pte | PTE_W);
   }
-  
-  return;
+
+  // Flush TLB
+  lcr3(V2P(p->pgdir));
 }
+
 
 //PAGEBREAK!
 // Blank page.
