@@ -47,7 +47,7 @@ kinit2(void *vstart, void *vend)
   freerange(vstart, vend);
   kmem.use_lock = 1;
   memset(&pmem.refcount, 0, sizeof(uint) * (PHYSTOP >> PGSHIFT));
-  pmem.num_free_pages = 0;
+  // pmem.num_free_pages = 0;  // line is removed
 }
 
 void
@@ -66,21 +66,48 @@ freerange(void *vstart, void *vend)
 void
 kfree(char *v)
 {
+
   struct run *r;
+
 
   if((uint)v % PGSIZE || v < end || V2P(v) >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
-  memset(v, 1, PGSIZE);
+  uint pa = V2P(v);
+  uint idx = pa >> PGSHIFT;
 
-  if(kmem.use_lock)
-    acquire(&kmem.lock);
+  // During early init (kinit1/kinit2), pages are being seeded into freelist.
+  // Skip refcount logic in that phase.
+  if(kmem.use_lock == 0){
+    memset(v, 1, PGSIZE);
+    r = (struct run*)v;
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+    pmem.num_free_pages++;
+    return;
+  }
+
+  if(kmem.use_lock) acquire(&kmem.lock);
+
+  // MUST drop the reference first.
+  if(pmem.refcount[idx] == 0)
+    panic("kfree: refcount underflow");
+  pmem.refcount[idx]--;
+
+  // If still referenced by someone else (e.g., CoW sibling), do nothing.
+  if(pmem.refcount[idx] > 0){
+    if(kmem.use_lock)
+      release(&kmem.lock);
+    return;
+  }
+
+  // Actually free the page now: poison contents, push to freelist, bump counter.
+  memset(v, 1, PGSIZE);                 // only when truly freeing
   r = (struct run*)v;
   r->next = kmem.freelist;
   kmem.freelist = r;
 
-  pmem.num_free_pages++;
+  pmem.num_free_pages++;                // only increment on real free
 
   if(kmem.use_lock)
     release(&kmem.lock);
@@ -97,10 +124,12 @@ kalloc(void)
   if(kmem.use_lock)
     acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
-
-  pmem.num_free_pages--;
+    pmem.num_free_pages--;                 // move under if(r)
+    uint pa = V2P((char*)r);
+    pmem.refcount[pa >> PGSHIFT] = 1;      // init refcount
+  }
 
   if(kmem.use_lock)
     release(&kmem.lock);
@@ -116,17 +145,17 @@ freemem(void)
 uint
 get_refcount(uint pa)
 {
-  return 0;
+  return pmem.refcount[pa >> PGSHIFT];
 }
 
 void
 inc_refcount(uint pa)
 {
-  return;
+  pmem.refcount[pa >> PGSHIFT]++;
 }
 
 void  
 dec_refcount(uint pa)
 {
-  return;
+  pmem.refcount[pa >> PGSHIFT]--;
 }
